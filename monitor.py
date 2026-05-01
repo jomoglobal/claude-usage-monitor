@@ -6,6 +6,7 @@ usage endpoint every 30 seconds. Shows a color-coded icon in the system tray
 """
 
 import json
+import logging
 import os
 import platform
 import subprocess
@@ -22,7 +23,13 @@ from PIL import Image, ImageDraw
 # Configuration
 # ---------------------------------------------------------------------------
 
-POLL_INTERVAL = 30  # seconds between API polls
+logging.basicConfig(
+    filename=os.path.join(os.path.dirname(os.path.abspath(__file__)), "monitor.log"),
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(message)s",
+)
+
+POLL_INTERVAL = 60  # seconds between API polls
 USAGE_API_URL = "https://api.anthropic.com/api/oauth/usage"
 USAGE_API_HEADERS_BASE = {"anthropic-beta": "oauth-2025-04-20"}
 
@@ -41,6 +48,9 @@ COLOR_GRAY   = (107, 114, 128)
 # ---------------------------------------------------------------------------
 
 class TokenExpiredError(Exception):
+    pass
+
+class RateLimitError(Exception):
     pass
 
 class APIError(Exception):
@@ -102,6 +112,9 @@ def fetch_usage(token: str) -> dict:
     if resp.status_code == 401:
         raise TokenExpiredError("OAuth token rejected (401)")
 
+    if resp.status_code == 429:
+        raise RateLimitError("Rate limited by Anthropic — will retry next interval")
+
     if not resp.ok:
         raise APIError(f"API returned {resp.status_code}: {resp.text[:200]}")
 
@@ -118,11 +131,20 @@ def fetch_usage(token: str) -> dict:
 # Icon generation
 # ---------------------------------------------------------------------------
 
-def make_icon(color: tuple) -> Image.Image:
-    """Generate a 64×64 PIL image: white background with a filled color circle."""
+def make_icon(color: tuple, label: str = "") -> Image.Image:
+    """Generate a 64×64 PIL image: colored text with dark outline for contrast."""
     img = Image.new("RGBA", (64, 64), (255, 255, 255, 0))
+    if not label:
+        return img
     draw = ImageDraw.Draw(img)
-    draw.ellipse([4, 4, 60, 60], fill=color + (255,))
+    font_size = 48 if len(label) <= 2 else 38
+    cx, cy = 29, 32
+    # Dark outline — draw the text shifted 1px in each direction
+    outline = (0, 0, 0, 180)
+    for dx, dy in [(-1,-1),(1,-1),(-1,1),(1,1),(0,-1),(0,1),(-1,0),(1,0)]:
+        draw.text((cx+dx, cy+dy), label, fill=outline, anchor="mm", font_size=font_size)
+    # Colored text on top
+    draw.text((cx, cy), label, fill=color + (255,), anchor="mm", font_size=font_size)
     return img
 
 
@@ -209,64 +231,81 @@ class PollState:
 _state = PollState()
 
 
+def _hours_until(iso: str) -> str:
+    """Return a compact string like '2.5h' for time until the reset timestamp."""
+    if not iso:
+        return ""
+    try:
+        dt_utc = datetime.fromisoformat(iso.replace("Z", "+00:00"))
+        delta = dt_utc - datetime.now(timezone.utc)
+        total_minutes = int(delta.total_seconds() / 60)
+        if total_minutes <= 0:
+            return "now"
+        hours = total_minutes / 60
+        return f"{hours:.1f}h"
+    except Exception:
+        return ""
+
+
 def _update_icon(five_pct: float, seven_pct: float,
                  five_reset: str, seven_reset: str):
     if _state.icon is None:
         return
     color = _color_for(five_pct, seven_pct)
-    _state.icon.icon = make_icon(color)
+    try:
+        _state.icon.icon = make_icon(color, f"{five_pct:.0f}")
+    except Exception as e:
+        logging.exception("Icon update failed: %s", e)
     _state.icon.title = format_tooltip(five_pct, seven_pct, five_reset, seven_reset)
 
 
 def _set_error_icon(message: str):
     if _state.icon is None:
         return
-    _state.icon.icon = make_icon(COLOR_GRAY)
+    _state.icon.icon = make_icon(COLOR_GRAY, "?")
     _state.icon.title = f"Claude Usage Monitor\n{message}"
 
 
 def poll_loop():
-    token_expired_notified = False
+    cli_refresh_attempted = False
 
     while not _state._stop.is_set():
         try:
             token = read_token()
             usage = fetch_usage(token)
-            token_expired_notified = False
+            cli_refresh_attempted = False  # reset on any success
             _update_icon(
                 usage["five_hour_pct"], usage["seven_day_pct"],
                 usage["five_hour_resets_at"], usage["seven_day_resets_at"],
             )
 
         except TokenExpiredError:
-            if not token_expired_notified:
+            # Try the CLI refresh exactly once; after that just show the error
+            # and keep polling — it will recover automatically once the user
+            # runs 'claude' in a terminal and the token file is updated.
+            if not cli_refresh_attempted:
+                cli_refresh_attempted = True
                 _set_error_icon("Token expired — attempting refresh…")
-                if _state.icon:
-                    _state.icon.notify(
-                        "Claude token expired — refreshing…",
-                        "Claude Usage Monitor",
-                    )
-                refreshed = refresh_token_via_cli()
-                if refreshed:
-                    # retry immediately on next loop iteration
+                if refresh_token_via_cli():
                     _state.force_refresh.set()
                 else:
                     _set_error_icon("Login required — run 'claude' to re-authenticate")
                     if _state.icon:
                         _state.icon.notify(
-                            "Could not refresh token. Please run 'claude' to log in.",
+                            "Could not refresh token. Run 'claude' in a terminal to log in.",
                             "Claude Usage Monitor",
                         )
-                    token_expired_notified = True
+            else:
+                _set_error_icon("Login required — run 'claude' to re-authenticate")
 
-        except FileNotFoundError as e:
-            _set_error_icon(str(e))
+        except RateLimitError:
+            # Keep the last good icon — just wait longer before retrying
+            logging.warning("Rate limited — skipping icon update, retrying next interval")
 
-        except APIError as e:
-            _set_error_icon(f"API error: {e}")
-
-        except Exception as e:
-            _set_error_icon(f"Unexpected error: {e}")
+        except (FileNotFoundError, APIError, Exception) as e:
+            # All other errors: show the error and retry next poll automatically.
+            logging.exception("Poll error: %s", e)
+            _set_error_icon(f"Error: {e}")
 
         # Wait for next poll or forced refresh
         _state.force_refresh.wait(timeout=POLL_INTERVAL)
