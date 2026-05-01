@@ -89,6 +89,46 @@ Right-click the icon for **Refresh Now** or **Exit**.
 4. On token expiry (HTTP 401), attempts auto-refresh via `claude update`, then notifies you if that fails
 5. On rate limit (HTTP 429), silently keeps the last good value and retries next interval
 
+## Uninstalling (current method)
+
+There is no installer yet, so uninstall is manual — but nothing is hidden:
+
+1. **Stop the app** — right-click the tray icon → Exit (or open Task Manager → find `pythonw.exe` → End task)
+2. **Remove from startup** — whichever method you used:
+   - Startup folder: press `Win+R` → type `shell:startup` → delete `startup.bat`
+   - Task Scheduler: open Task Scheduler → find "Claude Usage Monitor" → right-click → Delete
+3. **Delete the folder** — delete wherever you cloned the repo. That's the entire app.
+4. **Optionally remove the pip packages** — only if you don't use these elsewhere:
+   ```bat
+   pip uninstall pystray Pillow requests pyinstaller
+   ```
+
+Nothing is written to the registry. Nothing is written outside the repo folder except the pip packages.
+
+## Planned: proper installer (Inno Setup)
+
+The goal is to produce a `ClaudeMonitorSetup.exe` that installs like any normal Windows app — visible in **Apps > Installed Apps** with a working uninstall button.
+
+The build chain will be:
+
+```
+monitor.py
+    ↓ PyInstaller  →  monitor.exe  (self-contained, no Python needed on target)
+    ↓ Inno Setup   →  ClaudeMonitorSetup.exe  (the installer)
+```
+
+**PyInstaller** is already installed. It bundles `monitor.py` plus Python and all dependencies into a single `.exe` so the target machine needs nothing pre-installed.
+
+**Inno Setup** still needs to be installed — download from [jrsoftware.org/isdl.php](https://jrsoftware.org/isdl.php) and run the installer, accepting all defaults. The source for Inno Setup itself is at [github.com/jrsoftware/issrc](https://github.com/jrsoftware/issrc) if you're curious, but you don't need to build it from source — just use the prebuilt installer from the website.
+
+Once Inno Setup is installed, the plan is to:
+1. Write an Inno Setup script (`.iss` file) that defines app name, version, install location, startup entry, and uninstall behavior
+2. Run PyInstaller to produce `monitor.exe`
+3. Run Inno Setup to produce `ClaudeMonitorSetup.exe`
+4. Commit both the `.iss` script and the setup exe to the repo
+
+After that, installing on a new machine (like a laptop) is: download `ClaudeMonitorSetup.exe`, double-click, done — no Python, no git, no pip.
+
 ## Security
 
 - Reads credentials read-only from local disk — never writes or copies them anywhere
