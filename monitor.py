@@ -29,7 +29,7 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)s %(message)s",
 )
 
-POLL_INTERVAL = 60  # seconds between API polls
+POLL_INTERVAL = 120  # seconds between API polls (2 minutes)
 USAGE_API_URL = "https://api.anthropic.com/api/oauth/usage"
 USAGE_API_HEADERS_BASE = {"anthropic-beta": "oauth-2025-04-20"}
 
@@ -113,7 +113,8 @@ def fetch_usage(token: str) -> dict:
         raise TokenExpiredError("OAuth token rejected (401)")
 
     if resp.status_code == 429:
-        raise RateLimitError("Rate limited by Anthropic — will retry next interval")
+        retry_after = int(resp.headers.get("Retry-After", POLL_INTERVAL))
+        raise RateLimitError(retry_after)
 
     if not resp.ok:
         raise APIError(f"API returned {resp.status_code}: {resp.text[:200]}")
@@ -186,10 +187,12 @@ def _fmt_reset(iso: str) -> str:
 
 def format_tooltip(five_pct: float, seven_pct: float,
                    five_reset: str, seven_reset: str) -> str:
+    updated = datetime.now().strftime("%H:%M:%S")
     lines = [
         "Claude Usage Monitor",
         f"5-hour:  {five_pct:.1f}%  — resets {_fmt_reset(five_reset)}",
         f"7-day:   {seven_pct:.1f}%  — resets {_fmt_reset(seven_reset)}",
+        f"Updated: {updated}",
     ]
     return "\n".join(lines)
 
@@ -268,21 +271,37 @@ def _set_error_icon(message: str):
 
 def poll_loop():
     cli_refresh_attempted = False
+    last_usage = None
+    rate_limit_until = 0  # epoch seconds — don't poll before this time
 
     while not _state._stop.is_set():
+        now = time.time()
+
+        # Respect rate limit window even on manual refresh
+        if now < rate_limit_until:
+            wait = rate_limit_until - now
+            if last_usage:
+                _update_icon(
+                    last_usage["five_hour_pct"], last_usage["seven_day_pct"],
+                    last_usage["five_hour_resets_at"], last_usage["seven_day_resets_at"],
+                )
+            else:
+                _set_error_icon(f"Rate limited — retry in {int(wait) // 60}m")
+            _state.force_refresh.wait(timeout=wait)
+            _state.force_refresh.clear()
+            continue
+
         try:
             token = read_token()
             usage = fetch_usage(token)
-            cli_refresh_attempted = False  # reset on any success
+            cli_refresh_attempted = False
+            last_usage = usage
             _update_icon(
                 usage["five_hour_pct"], usage["seven_day_pct"],
                 usage["five_hour_resets_at"], usage["seven_day_resets_at"],
             )
 
         except TokenExpiredError:
-            # Try the CLI refresh exactly once; after that just show the error
-            # and keep polling — it will recover automatically once the user
-            # runs 'claude' in a terminal and the token file is updated.
             if not cli_refresh_attempted:
                 cli_refresh_attempted = True
                 _set_error_icon("Token expired — attempting refresh…")
@@ -298,16 +317,23 @@ def poll_loop():
             else:
                 _set_error_icon("Login required — run 'claude' to re-authenticate")
 
-        except RateLimitError:
-            # Keep the last good icon — just wait longer before retrying
-            logging.warning("Rate limited — skipping icon update, retrying next interval")
+        except RateLimitError as e:
+            retry_after = int(str(e))
+            rate_limit_until = time.time() + retry_after
+            logging.warning("Rate limited — blocked until %ds from now", retry_after)
+            if last_usage:
+                _update_icon(
+                    last_usage["five_hour_pct"], last_usage["seven_day_pct"],
+                    last_usage["five_hour_resets_at"], last_usage["seven_day_resets_at"],
+                )
+            else:
+                _set_error_icon(f"Rate limited — retry in {retry_after // 60}m")
 
         except (FileNotFoundError, APIError, Exception) as e:
-            # All other errors: show the error and retry next poll automatically.
             logging.exception("Poll error: %s", e)
             _set_error_icon(f"Error: {e}")
 
-        # Wait for next poll or forced refresh
+        # Wait for next poll or manual refresh trigger
         _state.force_refresh.wait(timeout=POLL_INTERVAL)
         _state.force_refresh.clear()
 

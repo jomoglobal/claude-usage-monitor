@@ -3,8 +3,8 @@
 A Windows system tray app that shows your Claude Pro 5-hour utilization as a color-coded number near the clock — no browser required.
 
 - **Green** = under 70%, **Yellow** = 70–89%, **Red** = 90%+
-- Hover for full details: 5-hour %, 7-day %, and both reset times
-- Polls every 60 seconds (no Claude token cost — just a metadata request)
+- Hover for full details: 5-hour %, 7-day %, both reset times, and when data was last fetched
+- Polls every 2 minutes (no Claude token cost — just a metadata request)
 - Reads your existing Claude Code credentials — zero configuration
 
 ## Requirements
@@ -19,12 +19,13 @@ A Windows system tray app that shows your Claude Pro 5-hour utilization as a col
 
 Open **Command Prompt or PowerShell** on Windows (not WSL):
 
-```bat
-cd %USERPROFILE%
+```powershell
 git clone https://github.com/jomoglobal/claude-usage-monitor.git
 cd claude-usage-monitor
 pip install -r requirements.txt
 ```
+
+You can clone it anywhere — there is no required location.
 
 ## Running
 
@@ -48,9 +49,7 @@ python monitor.py
 2. Press `Win + R`, type `shell:startup`, press Enter
 3. Copy `startup.bat` into the folder that opened
 
-The monitor launches automatically every time you log in.
-
-### Method 2 — Task Scheduler (more reliable, survives reboots cleanly)
+### Method 2 — Task Scheduler (more reliable)
 
 1. Open **Task Scheduler** (search in Start menu)
 2. Click **Create Basic Task…**
@@ -58,36 +57,42 @@ The monitor launches automatically every time you log in.
 4. Trigger: **When I log on**
 5. Action: **Start a program**
    - Program: `pythonw`
-   - Arguments: `C:\Users\YourName\claude-usage-monitor\monitor.py`
-   - Start in: `C:\Users\YourName\claude-usage-monitor`
+   - Arguments: `C:\path\to\claude-usage-monitor\monitor.py`
+   - Start in: `C:\path\to\claude-usage-monitor`
 6. Finish
 
 ## Tray icon
 
 | Display | Meaning |
 |---------|---------|
-| Green number | 5-hour usage low |
+| Green number | 5-hour usage low (< 70%) |
 | Yellow number | 5-hour usage getting close (≥ 70%) |
 | Red number | 5-hour usage near limit (≥ 90%) |
 | Gray `?` | Error — hover to see details |
 
 Right-click the icon for **Refresh Now** or **Exit**.
 
+Hover the icon to see full details including when the data was last successfully fetched.
+
 ## Troubleshooting
 
-**Gray `?` on startup** — Claude Code's token has expired. Open a terminal and run `claude` to refresh it. The monitor will recover automatically within 60 seconds.
+**Gray `?` on startup** — Claude Code's token has expired. Open a terminal and run `claude` to refresh it. The monitor recovers automatically on the next poll.
 
-**Icon not visible** — click the `^` arrow in the system tray to show hidden icons. You can drag the Claude monitor icon out to keep it always visible.
+**Token expiry** — the OAuth token in `~/.claude/.credentials.json` expires independently of your claude.ai browser session. Running `claude` in any terminal refreshes it.
+
+**Rate limiting** — if the app gets rate limited by Anthropic (HTTP 429), it reads the `Retry-After` header and waits exactly that long before trying again. It will not hit the endpoint during that window even if you click Refresh Now. This is intentional to avoid extending the ban. The tooltip will show how long until retry.
+
+**Icon not visible** — click the `^` arrow in the system tray to show hidden icons. You can drag the monitor icon out to keep it always visible.
 
 **Check the log** — if something seems wrong, open `monitor.log` in the repo folder. It records every error with a timestamp.
 
 ## How it works
 
 1. Reads `%USERPROFILE%\.claude\.credentials.json` — the OAuth token Claude Code writes after login
-2. Calls `GET https://api.anthropic.com/api/oauth/usage` with that token every 60 seconds
-3. Updates the tray icon color and number with the 5-hour utilization result
+2. Calls `GET https://api.anthropic.com/api/oauth/usage` every 2 minutes
+3. Updates the tray icon color and number with the 5-hour utilization
 4. On token expiry (HTTP 401), attempts auto-refresh via `claude update`, then notifies you if that fails
-5. On rate limit (HTTP 429), silently keeps the last good value and retries next interval
+5. On rate limit (HTTP 429), records the `Retry-After` deadline and displays last known data until the ban lifts — Refresh Now also respects this window
 
 ## Uninstalling (current method)
 
@@ -119,19 +124,19 @@ monitor.py
 
 **PyInstaller** is already installed. It bundles `monitor.py` plus Python and all dependencies into a single `.exe` so the target machine needs nothing pre-installed.
 
-**Inno Setup** still needs to be installed — download from [jrsoftware.org/isdl.php](https://jrsoftware.org/isdl.php) and run the installer, accepting all defaults. The source for Inno Setup itself is at [github.com/jrsoftware/issrc](https://github.com/jrsoftware/issrc) if you're curious, but you don't need to build it from source — just use the prebuilt installer from the website.
+**Inno Setup** still needs to be installed — download from [jrsoftware.org/isdl.php](https://jrsoftware.org/isdl.php) and run the installer, accepting all defaults. The source for Inno Setup is at [github.com/jrsoftware/issrc](https://github.com/jrsoftware/issrc) but you don't need to build it from source.
 
 Once Inno Setup is installed, the plan is to:
-1. Write an Inno Setup script (`.iss` file) that defines app name, version, install location, startup entry, and uninstall behavior
+1. Write an Inno Setup script (`.iss` file) defining app name, version, install location, startup entry, and uninstall behavior
 2. Run PyInstaller to produce `monitor.exe`
 3. Run Inno Setup to produce `ClaudeMonitorSetup.exe`
-4. Commit both the `.iss` script and the setup exe to the repo
+4. Commit the `.iss` script to the repo; distribute `ClaudeMonitorSetup.exe`
 
-After that, installing on a new machine (like a laptop) is: download `ClaudeMonitorSetup.exe`, double-click, done — no Python, no git, no pip.
+After that, installing on any machine is: download `ClaudeMonitorSetup.exe`, double-click, done — no Python, no git, no pip required.
 
 ## Security
 
 - Reads credentials read-only from local disk — never writes or copies them anywhere
 - Makes exactly one outbound connection: `api.anthropic.com`
 - No telemetry, no analytics, no third-party calls
-- All source code is in `monitor.py` (~250 lines) — easy to audit
+- All source code is in `monitor.py` — easy to audit
