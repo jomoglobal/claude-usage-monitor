@@ -76,15 +76,68 @@ Hover the icon to see full details including when the data was last successfully
 
 ## Troubleshooting
 
-**Gray `?` on startup** — Claude Code's token has expired. Open a terminal and run `claude` to refresh it. The monitor recovers automatically on the next poll.
+### Gray `?` instead of a number
 
-**Token expiry** — the OAuth token in `~/.claude/.credentials.json` expires independently of your claude.ai browser session. Running `claude` in any terminal refreshes it.
+The app is in an error state. Hover the icon to read the specific message. Common causes:
 
-**Rate limiting** — if the app gets rate limited by Anthropic (HTTP 429), it reads the `Retry-After` header and waits exactly that long before trying again. It will not hit the endpoint during that window even if you click Refresh Now. This is intentional to avoid extending the ban. The tooltip will show how long until retry.
+- **Token expired** — the OAuth token in `%USERPROFILE%\.claude\.credentials.json` has expired. This happens independently of your claude.ai browser session — they are separate auth systems. Fix: open any terminal and run `claude`. The monitor recovers automatically on the next poll.
+- **Rate limited** — see the rate limiting section below.
+- **Never successfully fetched** — if the app was rate limited from the very first poll, it has no data to display. Wait for the ban to lift (hover shows the countdown), then it will populate automatically.
 
-**Icon not visible** — click the `^` arrow in the system tray to show hidden icons. You can drag the monitor icon out to keep it always visible.
+### Rate limiting (HTTP 429) — the main known issue
 
-**Check the log** — if something seems wrong, open `monitor.log` in the repo folder. It records every error with a timestamp.
+This is the most persistent problem encountered during development. Anthropic's usage endpoint has a rate limit. If the app hits it too frequently — especially in a short burst — Anthropic issues a ban with a `Retry-After` header specifying how long to wait (sometimes up to 1 hour).
+
+**What causes it:**
+- The original 60-second poll interval worked fine during active use, but triggered the ban during debugging sessions where the app was stopped and restarted many times in quick succession
+- Each restart hits the API immediately, which counts as a burst even if the ongoing poll interval is reasonable
+- Clicking Refresh Now repeatedly while already rate limited resets the ban clock and extends the ban
+
+**How the app handles it now:**
+- On a 429 response, the app reads the `Retry-After` header and records a `rate_limit_until` timestamp
+- It will not hit the endpoint again until that timestamp passes — not even on Refresh Now
+- If there is cached data from a previous successful fetch, it keeps displaying that
+- If there is no cached data (e.g. rate limited on first launch), it shows `?` with a countdown in the tooltip
+- Once the ban expires, the app recovers automatically on the next poll cycle
+
+**If you are currently rate limited:**
+
+Check how long remains:
+```bash
+python3 -c "
+import json, requests
+with open('/mnt/c/Users/GLOBAL_HP/.claude/.credentials.json') as f:
+    token = json.load(f)['claudeAiOauth']['accessToken']
+resp = requests.get('https://api.anthropic.com/api/oauth/usage', headers={'Authorization': f'Bearer {token}', 'anthropic-beta': 'oauth-2025-04-20'}, timeout=15)
+print('Status:', resp.status_code)
+if resp.status_code == 429:
+    r = int(resp.headers.get('Retry-After', 0))
+    print(f'Banned — {r // 60}m {r % 60}s remaining')
+else:
+    print('Clear:', resp.text[:200])
+"
+```
+
+Do not restart the app or click Refresh Now while banned — it will reset the clock. Just wait.
+
+### Refresh Now not working
+
+If Refresh Now does not update the icon, the most likely cause is an active rate limit window. The app intentionally blocks API calls during a ban. Check the tooltip — if it shows a rate limit countdown, you must wait it out.
+
+### Stale data after a 5-hour reset
+
+When the 5-hour window resets, the usage drops to 0%. The monitor will show the old value until the next poll (up to 2 minutes). This is expected. Hover the tooltip — the "Updated:" timestamp tells you exactly how old the data is.
+
+### Icon not visible
+
+Click the `^` arrow in the system tray to show hidden icons. You can drag the monitor icon out of the overflow area to keep it always visible.
+
+### Checking the log
+
+`monitor.log` in the repo folder records every error with a timestamp. If the icon is misbehaving, this is the first place to look:
+```bash
+tail -30 /home/global_hp/claude-usage-monitor/monitor.log
+```
 
 ## How it works
 
